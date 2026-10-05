@@ -433,7 +433,7 @@ def html_lines(fragment):
     lines = []
     for line in container.get_text().split("\n"):
         line = re.sub(r"\s+", " ", line).strip()
-        line = re.sub(r"^([-–—•·*▪●✔✅]|\d+[.)])\s*", "", line).strip()
+        line = re.sub(r"^([-–—•·*▪●◆◇■□○◦►▸➤✔✅☑️]|\d+[.)])\s*", "", line).strip()
         if line:
             lines.append(line)
     return lines
