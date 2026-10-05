@@ -76,6 +76,9 @@ def fetch(url):
             resp.raise_for_status()
             return resp.text, resp.url
         except requests.RequestException as err:
+            status = err.response.status_code if err.response is not None else None
+            if status is not None and status < 500:
+                raise  # 403/404/429 повтор не исправит
             last_error = err
             time.sleep(3 * (attempt + 1))
     raise last_error
@@ -374,6 +377,11 @@ def search_source(source, search, queries):
             errors += 1
             results.append([])
             print(f"[{source}] ошибка при поиске «{query}»: {err}", file=sys.stderr)
+            response = getattr(err, "response", None)
+            if response is not None and response.status_code in (403, 429):
+                print(f"[{source}] сайт не пускает этот сервер — пропускаем его сегодня",
+                      file=sys.stderr)
+                break
     total = sum(len(r) for r in results)
     print(f"[{source}] найдено карточек: {total}, ошибок запросов: {errors}")
     return results
@@ -384,10 +392,15 @@ def collect_candidates(config, sent, allowed, allow_unknown):
     queries = [(c, q) for c in config["categories"] for q in c["search"]]
 
     # Сайты обходятся одновременно, но каждый — по одному запросу за раз.
-    with ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
+    enabled = config.get("sources") or list(SOURCES)
+    unknown = [s for s in enabled if s not in SOURCES]
+    if unknown:
+        raise SystemExit(f"Неизвестные сайты в config.yaml: {', '.join(unknown)}. "
+                         f"Можно: {', '.join(SOURCES)}")
+    with ThreadPoolExecutor(max_workers=len(enabled)) as pool:
         futures = {
-            source: pool.submit(search_source, source, search, [q for _, q in queries])
-            for source, search in SOURCES.items()
+            source: pool.submit(search_source, source, SOURCES[source], [q for _, q in queries])
+            for source in SOURCES if source in enabled
         }
         per_source = {source: future.result() for source, future in futures.items()}
 
