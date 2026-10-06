@@ -7,7 +7,7 @@
 //
 // Нужные секреты в настройках Worker (Settings → Variables and Secrets):
 //   TELEGRAM_TOKEN   — токен бота (тот же, что на GitHub)
-//   TELEGRAM_CHAT_ID — ваш Id (тот же, что на GitHub)
+//   TELEGRAM_CHAT_ID — Id получателей через запятую: ваш, коллег или группы (как на GitHub)
 //   GITHUB_TOKEN     — токен GitHub с правом запускать Actions
 
 const GITHUB_REPO = "toxickkiwi/klac";
@@ -39,28 +39,41 @@ export default {
 };
 
 async function handleUpdate(update, env) {
-  const ownerChat = String(env.TELEGRAM_CHAT_ID);
+  // Кому можно пользоваться ботом: Id людей или групп через запятую.
+  const allowed = String(env.TELEGRAM_CHAT_ID).split(",").map((id) => id.trim());
 
   if (update.callback_query) {
     const query = update.callback_query;
-    if (String(query.from.id) !== ownerChat || query.data !== "more") {
+    const chat = String(query.message ? query.message.chat.id : query.from.id);
+    if (!allowed.includes(chat) || query.data !== "more") {
       return telegram(env, "answerCallbackQuery", { callback_query_id: query.id });
     }
     await telegram(env, "answerCallbackQuery", {
       callback_query_id: query.id,
       text: "Ищу ещё вакансии…",
     });
-    return requestMore(env);
+    return requestMore(env, chat);
   }
 
   const message = update.message;
-  if (!message || !message.text || String(message.chat.id) !== ownerChat) {
-    return; // чужие сообщения игнорируем
+  if (!message || !message.text) {
+    return;
   }
+  const chat = String(message.chat.id);
   const text = message.text.trim().toLowerCase();
+  if (text.startsWith("/id")) {
+    // Помогает узнать Id группы или человека, чтобы добавить его в TELEGRAM_CHAT_ID.
+    return telegram(env, "sendMessage", { chat_id: chat, text: `Id этого чата: ${chat}` });
+  }
+  if (!allowed.includes(chat)) {
+    return telegram(env, "sendMessage", {
+      chat_id: chat,
+      text: `У вас пока нет доступа. Перешлите владельцу бота этот Id: ${chat}`,
+    });
+  }
   if (text.startsWith("/start") || text.startsWith("/help")) {
     return telegram(env, "sendMessage", {
-      chat_id: ownerChat,
+      chat_id: chat,
       text:
         "Привет! Каждое утро я присылаю подборку вакансий.\n\n" +
         `Нужно больше — нажмите «${BUTTON_TEXT}» внизу или напишите /more. ` +
@@ -73,11 +86,11 @@ async function handleUpdate(update, env) {
     });
   }
   if (text.startsWith("/more") || text === BUTTON_TEXT.toLowerCase() || /^ещ[её]/.test(text)) {
-    return requestMore(env);
+    return requestMore(env, chat);
   }
 }
 
-async function requestMore(env) {
+async function requestMore(env, chat) {
   const resp = await fetch(
     `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches`,
     {
@@ -101,7 +114,7 @@ async function requestMore(env) {
   if (!resp.ok) {
     console.log("GitHub:", resp.status, await resp.text());
   }
-  return telegram(env, "sendMessage", { chat_id: String(env.TELEGRAM_CHAT_ID), text });
+  return telegram(env, "sendMessage", { chat_id: chat, text });
 }
 
 async function setup(url, env) {
@@ -115,7 +128,10 @@ async function setup(url, env) {
     allowed_updates: ["message", "callback_query"],
   });
   await telegram(env, "setMyCommands", {
-    commands: [{ command: "more", description: "Ещё 5 вакансий" }],
+    commands: [
+      { command: "more", description: "Ещё 5 вакансий" },
+      { command: "id", description: "Узнать Id этого чата" },
+    ],
   });
   const text = hook.ok
     ? "✅ Готово! Напишите боту /start — внизу появится кнопка «Ещё 5 вакансий»."

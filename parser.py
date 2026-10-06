@@ -590,9 +590,10 @@ MORE_BUTTON = {"inline_keyboard": [[{"text": "➕ Ещё 5 вакансий", "c
 
 def send_telegram(text, with_button=False):
     token = os.environ["TELEGRAM_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    # Можно указать несколько получателей через запятую: Id людей или группы.
+    chat_ids = [c.strip() for c in os.environ["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
     parts = split_message(text)
-    for number, part in enumerate(parts, 1):
+    for chat_id, (number, part) in ((c, p) for c in chat_ids for p in enumerate(parts, 1)):
         payload = {"chat_id": chat_id, "text": part, "parse_mode": "HTML",
                    "disable_web_page_preview": True}
         if with_button and number == len(parts):
