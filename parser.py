@@ -7,8 +7,11 @@
     python parser.py            — найти вакансии и отправить в Telegram
     python parser.py --dry-run  — только показать сообщение, ничего не отправлять
 
-Переменная окружения EXPERIENCE (например «1-3» или «без опыта, 1-3»)
-временно заменяет фильтр опыта из config.yaml.
+Переменные окружения (все необязательные):
+    EXPERIENCE   — например «1-3» или «без опыта, 1-3»: заменяет фильтр опыта из config.yaml
+    COUNT        — сколько вакансий прислать вместо per_day
+    MODE=extra   — дополнительная подборка («Ещё вакансии») вместо утренней
+    MORE_BUTTON=0 — не добавлять под сообщением кнопку «Ещё 5 вакансий»
 """
 
 import html
@@ -544,14 +547,15 @@ def pick(candidates, config, allowed, allow_unknown):
 
 # ---------- сообщение и отправка ----------
 
-def build_message(picked, problems, today, allowed):
+def build_message(picked, problems, today, allowed, extra=False):
     esc = html.escape
-    title = f"🗓 <b>Вакансии на {today:%d.%m}</b>"
+    title = "➕ <b>Ещё вакансии</b>" if extra else f"🗓 <b>Вакансии на {today:%d.%m}</b>"
     if allowed:
         title += " · опыт: " + ", ".join(EXPERIENCE_LABELS[e] for e in EXPERIENCE_LABELS if e in allowed)
     parts = [title]
     if not picked:
-        parts.append("Сегодня новых подходящих вакансий не нашлось.")
+        parts.append("Новых подходящих вакансий больше не нашлось."
+                     if extra else "Сегодня новых подходящих вакансий не нашлось.")
     for number, v in enumerate(picked, 1):
         where = "удалённо" if v["remote"] else v["city"]
         heading = " / ".join(x for x in [v["title"], v["company"]] if x)
@@ -580,15 +584,21 @@ def split_message(text, limit=TELEGRAM_LIMIT):
     return messages + [current]
 
 
-def send_telegram(text):
+# Кнопка под последним сообщением. Её нажатие ловит бот-помощник (worker.js, см. README).
+MORE_BUTTON = {"inline_keyboard": [[{"text": "➕ Ещё 5 вакансий", "callback_data": "more"}]]}
+
+
+def send_telegram(text, with_button=False):
     token = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    for part in split_message(text):
+    parts = split_message(text)
+    for number, part in enumerate(parts, 1):
+        payload = {"chat_id": chat_id, "text": part, "parse_mode": "HTML",
+                   "disable_web_page_preview": True}
+        if with_button and number == len(parts):
+            payload["reply_markup"] = MORE_BUTTON
         resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": part, "parse_mode": "HTML",
-                  "disable_web_page_preview": True},
-            timeout=30,
+            f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=30,
         )
         if not resp.ok:
             raise SystemExit(f"Telegram не принял сообщение: {resp.status_code} {resp.text}")
@@ -616,17 +626,22 @@ def main():
     allowed = experience_filter(config)
     allow_unknown = config.get("experience_unknown", True)
     sent = load_sent()
+    # Запуск по кнопке «Ещё 5»: другое число вакансий и другой заголовок.
+    extra = os.environ.get("MODE") == "extra"
+    count = os.environ.get("COUNT", "").strip()
+    if count:
+        config["per_day"] = int(count)
 
     candidates, problems = collect_candidates(config, sent, allowed, allow_unknown)
     print(f"Подходящих новых вакансий: {len(candidates)}")
     picked = pick(candidates, config, allowed, allow_unknown)
 
-    message = build_message(picked, problems, datetime.now(ZoneInfo("Europe/Minsk")), allowed)
+    message = build_message(picked, problems, datetime.now(ZoneInfo("Europe/Minsk")), allowed, extra)
     print("\n" + message + "\n")
     if dry_run:
         print("(--dry-run: ничего не отправлено и не сохранено)")
         return
-    send_telegram(message)
+    send_telegram(message, with_button=os.environ.get("MORE_BUTTON") != "0")
     save_sent(sent, picked)
     print("Отправлено в Telegram.")
 
