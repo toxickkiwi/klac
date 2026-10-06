@@ -31,17 +31,23 @@ ROOT = Path(__file__).parent
 CONFIG_FILE = ROOT / "config.yaml"
 SENT_FILE = ROOT / "sent.json"
 SENT_LIMIT = 3000  # сколько последних отправленных вакансий помнить
-MAX_DETAIL_PAGES = 25  # сколько страниц вакансий открывать в поисках подходящих
+MAX_DETAIL_PAGES = 60  # сколько страниц вакансий открывать в поисках подходящих
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 REQUEST_PAUSE = 1.5  # секунд между запросами к одному сайту
+TELEGRAM_LIMIT = 4000  # длина одного сообщения (у Telegram предел 4096)
 
 DUTY_HEADING = re.compile(
     r"обязанност|задачи|чем (предстоит|нужно|будешь|будете)|что (нужно |предстоит )?делать"
     r"|функционал|responsibilit|what you.ll do",
+    re.IGNORECASE,
+)
+NEXT_SECTION = re.compile(
+    r"(требования|условия|мы предлагаем|предлагаем|ожидания|что мы ждем|кого мы ищем"
+    r"|наши ожидания|будет плюсом|будет преимуществом)\W*$",
     re.IGNORECASE,
 )
 BLOCK_TAGS = ["p", "li", "ul", "ol", "div", "h1", "h2", "h3", "h4", "h5", "h6", "table", "tr"]
@@ -194,26 +200,6 @@ def search_minsk_business(query):
     return found
 
 
-def search_gorodrabot(query):
-    soup = soup_of(f"https://belarus.gorodrabot.by/?q={quote(query)}")
-    found = []
-    for card in soup.select(".snippet.vacancy"):
-        link = card.select_one("a.snippet__title-link")
-        match = link and re.search(r"/advert/(\d+)", link.get("href", ""))
-        if not match:
-            continue
-        found.append(vacancy(
-            "gorodrabot.by", "gorodrabot:" + match.group(1),
-            link["href"],
-            text_of(link),
-            company=text_of(card.select_one(".snippet__meta-item_company")),
-            city=text_of(card.select_one(".snippet__meta-item_location")),
-            remote="удал" in text_of(card).lower(),
-            snippet=text_of(card.select_one(".snippet__desc")),
-        ))
-    return found
-
-
 def search_careerist(query):
     soup = soup_of(f"https://minsk.careerist.ru/search/?category=vacancy&text={quote(query)}")
     found = []
@@ -271,7 +257,6 @@ SOURCES = {
     "praca.by": search_praca,
     "minsk.business": search_minsk_business,
     "belmeta.com": search_belmeta,
-    "gorodrabot.by": search_gorodrabot,
     "careerist.ru": search_careerist,
     "bebee.com": search_bebee,
 }
@@ -279,7 +264,6 @@ DESCRIPTION_SELECTORS = {
     "rabota.by": '[data-qa="vacancy-description"]',
     "praca.by": ".vacancy__description",
     "belmeta.com": "div.text",
-    "gorodrabot.by": ".content__module",
     "careerist.ru": ".targetDesBG",
 }
 
@@ -485,8 +469,8 @@ def summarize(lines, max_items=3, max_length=200):
         if len(line) <= 60 and DUTY_HEADING.search(line):
             items = []
             for item in lines[index + 1:]:
-                if item.endswith(":") and len(item) <= 60:  # начался следующий раздел
-                    break
+                if (item.endswith(":") and len(item) <= 60) or NEXT_SECTION.match(item):
+                    break  # начался следующий раздел
                 item = shorten(item.rstrip(";.,"), 110)
                 if items and len("; ".join(items + [item])) > max_length:
                     break
@@ -537,20 +521,23 @@ def load_details(item):
 
 
 def pick(candidates, config, allowed, allow_unknown):
-    """Выбирает вакансии на сегодня: подходящий опыт, не больше одной от компании."""
-    picked, companies, opened = [], set(), 0
-    per_day = config.get("per_day", 2)
+    """Выбирает вакансии на сегодня: подходящий опыт, не больше одной от компании
+    и не больше трети списка с одного сайта — чтобы подборка была разнообразной."""
+    picked, companies, per_source, opened = [], set(), {}, 0
+    per_day = config.get("per_day", 10)
+    source_limit = max(2, -(-per_day // 3))
     for item in candidates:
         if len(picked) == per_day or opened >= MAX_DETAIL_PAGES:
             break
         company = item["key"].split("|")[1]
-        if company and company in companies:
+        if (company and company in companies) or per_source.get(item["source"], 0) >= source_limit:
             continue
         load_details(item)
         opened += 1
         if not experience_ok(item["experience"], allowed, allow_unknown):
             continue
         companies.add(company)
+        per_source[item["source"]] = per_source.get(item["source"], 0) + 1
         picked.append(item)
     return picked
 
@@ -580,17 +567,32 @@ def build_message(picked, problems, today, allowed):
     return "\n\n".join(parts)
 
 
+def split_message(text, limit=TELEGRAM_LIMIT):
+    """Telegram принимает до 4096 символов — длинный список делится по вакансиям."""
+    messages, current = [], ""
+    for block in text.split("\n\n"):
+        candidate = f"{current}\n\n{block}" if current else block
+        if current and len(candidate) > limit:
+            messages.append(current)
+            current = block
+        else:
+            current = candidate
+    return messages + [current]
+
+
 def send_telegram(text):
     token = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    resp = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
-              "disable_web_page_preview": True},
-        timeout=30,
-    )
-    if not resp.ok:
-        raise SystemExit(f"Telegram не принял сообщение: {resp.status_code} {resp.text}")
+    for part in split_message(text):
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": part, "parse_mode": "HTML",
+                  "disable_web_page_preview": True},
+            timeout=30,
+        )
+        if not resp.ok:
+            raise SystemExit(f"Telegram не принял сообщение: {resp.status_code} {resp.text}")
+        time.sleep(1)
 
 
 def load_sent():
