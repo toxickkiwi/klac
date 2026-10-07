@@ -11,6 +11,7 @@
     EXPERIENCE   — например «1-3» или «без опыта, 1-3»: заменяет фильтр опыта из config.yaml
     COUNT        — сколько вакансий прислать вместо per_day
     MODE=extra   — дополнительная подборка («Ещё вакансии») вместо утренней
+    SKIP_IF_SENT=1 — не отправлять утреннюю подборку, если сегодня она уже была
     MORE_BUTTON=0 — не добавлять под сообщением кнопку «Ещё 5 вакансий»
 """
 
@@ -632,17 +633,25 @@ def main():
     count = os.environ.get("COUNT", "").strip()
     if count:
         config["per_day"] = int(count)
+    today = datetime.now(ZoneInfo("Europe/Minsk"))
+    # Запасной запуск по расписанию GitHub не дублирует утреннюю подборку,
+    # если будильник Cloudflare уже прислал её сегодня.
+    if not extra and os.environ.get("SKIP_IF_SENT") == "1" and sent.get("last_daily") == today.date().isoformat():
+        print("Утренняя подборка сегодня уже отправлена — пропускаем.")
+        return
 
     candidates, problems = collect_candidates(config, sent, allowed, allow_unknown)
     print(f"Подходящих новых вакансий: {len(candidates)}")
     picked = pick(candidates, config, allowed, allow_unknown)
 
-    message = build_message(picked, problems, datetime.now(ZoneInfo("Europe/Minsk")), allowed, extra)
+    message = build_message(picked, problems, today, allowed, extra)
     print("\n" + message + "\n")
     if dry_run:
         print("(--dry-run: ничего не отправлено и не сохранено)")
         return
     send_telegram(message, with_button=os.environ.get("MORE_BUTTON") != "0")
+    if not extra:
+        sent["last_daily"] = today.date().isoformat()
     save_sent(sent, picked)
     print("Отправлено в Telegram.")
 

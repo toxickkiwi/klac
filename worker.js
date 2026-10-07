@@ -5,6 +5,10 @@
 // задачу «Вакансии дня» в режиме «ещё». Через 2–3 минуты бот присылает 5 вакансий,
 // которых ещё не было.
 //
+// Ещё он работает будильником: каждое утро запускает утреннюю подборку. Для этого в
+// Cloudflare нужен Cron Trigger (Settings → Trigger Events) — расписание GitHub слишком
+// часто опаздывает на несколько часов.
+//
 // Нужные секреты в настройках Worker (Settings → Variables and Secrets):
 //   TELEGRAM_TOKEN   — токен бота (тот же, что на GitHub)
 //   TELEGRAM_CHAT_ID — Id получателей через запятую: ваш, коллег или группы (как на GitHub)
@@ -35,6 +39,20 @@ export default {
       return new Response("ok"); // Telegram ждёт ответ 200, иначе будет повторять
     }
     return new Response("Бот-помощник работает. Для настройки откройте /setup");
+  },
+
+  // Будильник: срабатывает по Cron Trigger из настроек Cloudflare.
+  async scheduled(event, env, ctx) {
+    const resp = await startWorkflow(env, { mode: "daily" });
+    if (!resp.ok) {
+      console.log("GitHub:", resp.status, await resp.text());
+      const firstChat = String(env.TELEGRAM_CHAT_ID).split(",")[0].trim();
+      await telegram(env, "sendMessage", {
+        chat_id: firstChat,
+        text: `⚠️ Не получилось запустить утреннюю подборку (GitHub ответил ${resp.status}). ` +
+          "Проверьте GITHUB_TOKEN в настройках Cloudflare.",
+      });
+    }
   },
 };
 
@@ -91,7 +109,19 @@ async function handleUpdate(update, env) {
 }
 
 async function requestMore(env, chat) {
-  const resp = await fetch(
+  const resp = await startWorkflow(env, { count: EXTRA_COUNT, mode: "extra" });
+  const text = resp.ok
+    ? "🔎 Ищу ещё 5 вакансий, пришлю через 2–3 минуты."
+    : `⚠️ Не получилось запустить поиск (GitHub ответил ${resp.status}). ` +
+      "Проверьте GITHUB_TOKEN в настройках Cloudflare.";
+  if (!resp.ok) {
+    console.log("GitHub:", resp.status, await resp.text());
+  }
+  return telegram(env, "sendMessage", { chat_id: chat, text });
+}
+
+function startWorkflow(env, inputs) {
+  return fetch(
     `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches`,
     {
       method: "POST",
@@ -101,20 +131,9 @@ async function requestMore(env, chat) {
         "User-Agent": "klac-vacancies-bot",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        ref: GITHUB_BRANCH,
-        inputs: { count: EXTRA_COUNT, mode: "extra" },
-      }),
+      body: JSON.stringify({ ref: GITHUB_BRANCH, inputs }),
     },
   );
-  const text = resp.ok
-    ? "🔎 Ищу ещё 5 вакансий, пришлю через 2–3 минуты."
-    : `⚠️ Не получилось запустить поиск (GitHub ответил ${resp.status}). ` +
-      "Проверьте GITHUB_TOKEN в настройках Cloudflare.";
-  if (!resp.ok) {
-    console.log("GitHub:", resp.status, await resp.text());
-  }
-  return telegram(env, "sendMessage", { chat_id: chat, text });
 }
 
 async function setup(url, env) {

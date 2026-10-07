@@ -2,8 +2,9 @@ name: Вакансии дня
 
 on:
   schedule:
-    # 04:50 по UTC = 07:50 по Минску. GitHub обычно запускает с задержкой
-    # в 5–15 минут, поэтому сообщение приходит около 8:00.
+    # Основной будильник — Cron Trigger в Cloudflare (см. README): он срабатывает вовремя.
+    # Это запасной запуск: GitHub часто опаздывает на несколько часов, поэтому он
+    # ничего не отправит, если утренняя подборка сегодня уже пришла.
     - cron: "50 4 * * *"
   workflow_dispatch: # кнопка «Run workflow» для ручного запуска
     inputs:
@@ -59,6 +60,7 @@ jobs:
           EXPERIENCE: ${{ inputs.experience }}
           COUNT: ${{ inputs.count }}
           MODE: ${{ inputs.mode }}
+          SKIP_IF_SENT: ${{ github.event_name == 'schedule' && '1' || '' }}
         run: python parser.py
 
       - name: Запомнить отправленные вакансии
