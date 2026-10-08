@@ -12,6 +12,7 @@
     COUNT        — сколько вакансий прислать вместо per_day
     MODE=extra   — дополнительная подборка («Ещё вакансии») вместо утренней
     SKIP_IF_SENT=1 — не отправлять утреннюю подборку, если сегодня она уже была
+    PROFILE=mom  — личный поиск по config_mom.yaml (свой список отправленного: sent_mom.json)
     MORE_BUTTON=0 — не добавлять под сообщением кнопку «Ещё 5 вакансий»
 """
 
@@ -104,11 +105,13 @@ def text_of(element):
 
 
 def vacancy(source, vacancy_id, url, title, company="", city="", remote=False,
-            experience=None, snippet=""):
+            experience=None, snippet="", card_text=""):
+    salary, salary_text = detect_salary(card_text or snippet)
     return {
         "source": source, "id": vacancy_id, "url": url, "title": title,
         "company": company, "city": city, "remote": remote,
         "experience": experience or detect_experience(snippet), "snippet": snippet,
+        "salary": salary, "salary_text": salary_text,
     }
 
 
@@ -138,6 +141,7 @@ def search_rabota(query):
             city=address.split(",")[0],
             remote=card.select_one('[data-qa="vacancy-label-work-schedule-remote"]') is not None,
             experience=experience,
+            card_text=text_of(card),
         ))
     return found
 
@@ -158,6 +162,7 @@ def search_praca(query):
             city=text_of(card.select_one(".vac-small__city")),
             remote="удал" in text_of(card).lower(),
             snippet=text_of(card.select_one(".vac-small__experience")),
+            card_text=text_of(card),
         ))
     return found
 
@@ -179,6 +184,7 @@ def search_belmeta(query):
             city=places[1].strip() if len(places) > 1 else text_of(region),
             remote="удал" in text_of(card).lower(),
             snippet=text_of(card.select_one(".desc")),
+            card_text=text_of(card),
         ))
     return found
 
@@ -200,6 +206,7 @@ def search_minsk_business(query):
             city="Минск",
             remote="удал" in text_of(card).lower(),
             snippet=text_of(card.select_one(".card-text")),
+            card_text=text_of(card),
         ))
     return found
 
@@ -222,6 +229,7 @@ def search_careerist(query):
             city=text_of(card.select_one(".room")),
             remote="удал" in text_of(card).lower(),
             snippet=text_of(texts[-1]) if texts else "",
+            card_text=text_of(card),
         ))
     return found
 
@@ -251,6 +259,7 @@ def search_bebee(query):
             city=city,
             remote="удал" in " ".join(strings).lower(),
             snippet=" ".join(after_city[1:-1]),
+            card_text=" ".join(strings),
         ))
     return found
 
@@ -297,6 +306,34 @@ def detect_experience(text):
     return "6+"
 
 
+SALARY = re.compile(
+    r"(?:(?:от|до)\s*)?(\d[\d\s\u202f\xa0]*)(?:[.,]\d+)?"
+    r"(?:\s*[-–—]\s*(\d[\d\s\u202f\xa0]*)(?:[.,]\d+)?)?\s*"
+    r"(br\b|byn|бел\.?\s*руб|руб|р\.|\$|usd)"
+    r"|(\$|usd)\s*(\d[\d\s\u202f\xa0]*)",
+    re.IGNORECASE,
+)
+USD_RATE = 3.0  # примерный курс для сравнения зарплат в долларах
+
+
+def detect_salary(text):
+    """Находит зарплату в тексте: возвращает (наибольшая сумма в BYN, как написано) или (None, "")."""
+    for match in SALARY.finditer(text or ""):
+        if match.group(5):
+            numbers, currency = [match.group(5)], "$"
+        else:
+            numbers, currency = [match.group(1), match.group(2)], match.group(3)
+        values = [int(re.sub(r"\D", "", n)) for n in numbers if n and re.sub(r"\D", "", n)]
+        values = [v for v in values if v >= 100]  # отсекаем «2 раза в месяц» и т. п.
+        if not values:
+            continue
+        shown = re.sub(r"\s+", " ", match.group(0)).strip()
+        if shown.lower().startswith("от") and not match.group(2):
+            return None, shown  # «от 1 700» — верхней границы нет, порог не применяем
+        return max(values) * (USD_RATE if currency.lower() in ("$", "usd") else 1), shown
+    return None, ""
+
+
 def experience_filter(config):
     """Какие варианты опыта подходят. Пустое множество — подходит любой."""
     raw = os.environ.get("EXPERIENCE", "").strip()
@@ -328,6 +365,25 @@ def experience_ok(experience, allowed, allow_unknown):
 
 
 # ---------- отбор ----------
+
+def place_and_salary_ok(item, config):
+    """Фильтры профиля: только этот город, без удалёнки, зарплата не ниже порога."""
+    only_city = (config.get("only_city") or "").lower()
+    if only_city and (item["remote"] or item["city"].lower().strip() != only_city):
+        return False
+    if config.get("remote") is False and item["remote"]:
+        return False
+    min_salary = config.get("min_salary")
+    if min_salary and item["salary"] is not None and item["salary"] < min_salary:
+        return False
+    return True
+
+
+def text_ok(item, config):
+    """Стоп-слова в полном тексте вакансии (например «английский», «ночные смены»)."""
+    text = item.get("page_text", "").lower()
+    return not any(re.search(word_pattern(w), text) for w in config.get("text_stop_words") or [])
+
 
 def word_pattern(word):
     """«маркет» найдёт «маркетолог»; короткие слова («pr», «ux») — только целиком."""
@@ -405,7 +461,8 @@ def collect_candidates(config, sent, allowed, allow_unknown):
                     continue
                 seen_ids.add(item["id"])
                 category = find_category(item["title"], config)
-                if not category or not experience_ok(item["experience"], allowed, True):
+                if (not category or not experience_ok(item["experience"], allowed, True)
+                        or not place_and_salary_ok(item, config)):
                     continue
                 item.update(key=key, category=category["name"],
                             priority=category["priority"], position=position)
@@ -514,8 +571,11 @@ def load_details(item):
     except Exception as err:
         print(f"Не удалось открыть {item['url']}: {err}", file=sys.stderr)
 
+    item["page_text"] = page_text
     if item["experience"] is None:
         item["experience"] = detect_experience(page_text)
+    if item["salary"] is None:
+        item["salary"], item["salary_text"] = detect_salary(page_text)
     item["summary_label"], item["summary"] = (
         summarize(lines) or fallback_summary(item["snippet"] or " ".join(lines[:3]))
     )
@@ -538,7 +598,8 @@ def pick(candidates, config, allowed, allow_unknown):
             continue
         load_details(item)
         opened += 1
-        if not experience_ok(item["experience"], allowed, allow_unknown):
+        if (not experience_ok(item["experience"], allowed, allow_unknown)
+                or not text_ok(item, config) or not place_and_salary_ok(item, config)):
             continue
         companies.add(company)
         per_source[item["source"]] = per_source.get(item["source"], 0) + 1
@@ -548,9 +609,13 @@ def pick(candidates, config, allowed, allow_unknown):
 
 # ---------- сообщение и отправка ----------
 
-def build_message(picked, problems, today, allowed, extra=False):
+def build_message(picked, problems, today, allowed, extra=False, config=None):
     esc = html.escape
-    title = "➕ <b>Ещё вакансии</b>" if extra else f"🗓 <b>Вакансии на {today:%d.%m}</b>"
+    config = config or {}
+    if extra:
+        title = f"<b>{esc(config.get('extra_title', '➕ Ещё вакансии'))}</b>"
+    else:
+        title = f"🗓 <b>Вакансии на {today:%d.%m}</b>"
     if allowed:
         title += " · опыт: " + ", ".join(EXPERIENCE_LABELS[e] for e in EXPERIENCE_LABELS if e in allowed)
     parts = [title]
@@ -565,6 +630,8 @@ def build_message(picked, problems, today, allowed, extra=False):
         lines = [f"{number}. <b>{esc(heading)}</b>"]
         if v["experience"]:
             lines.append(f"Опыт: {esc(EXPERIENCE_LABELS[v['experience']])}")
+        if config.get("show_salary") and v.get("salary_text"):
+            lines.append(f"Зарплата: {esc(v['salary_text'])}")
         lines.append(f"{esc(v['summary_label'])}: {esc(v['summary'])}")
         lines.append(f"🔗 {esc(v['url'])}")
         parts.append("\n".join(lines))
@@ -586,19 +653,24 @@ def split_message(text, limit=TELEGRAM_LIMIT):
 
 
 # Кнопка под последним сообщением. Её нажатие ловит бот-помощник (worker.js, см. README).
-MORE_BUTTON = {"inline_keyboard": [[{"text": "➕ Ещё 5 вакансий", "callback_data": "more"}]]}
+DEFAULT_BUTTON = {"text": "➕ Ещё 5 вакансий", "data": "more"}
 
 
-def send_telegram(text, with_button=False):
+def send_telegram(text, with_button=False, button=None, only_owner=False):
     token = os.environ["TELEGRAM_TOKEN"]
     # Можно указать несколько получателей через запятую: Id людей или группы.
+    # Первый Id — владелец бота; личные подборки (only_owner) уходят только ему.
     chat_ids = [c.strip() for c in os.environ["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
+    if only_owner:
+        chat_ids = chat_ids[:1]
+    button = button or DEFAULT_BUTTON
+    markup = {"inline_keyboard": [[{"text": button["text"], "callback_data": button["data"]}]]}
     parts = split_message(text)
     for chat_id, (number, part) in ((c, p) for c in chat_ids for p in enumerate(parts, 1)):
         payload = {"chat_id": chat_id, "text": part, "parse_mode": "HTML",
                    "disable_web_page_preview": True}
         if with_button and number == len(parts):
-            payload["reply_markup"] = MORE_BUTTON
+            payload["reply_markup"] = markup
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=30,
         )
@@ -607,16 +679,16 @@ def send_telegram(text, with_button=False):
         time.sleep(1)
 
 
-def load_sent():
-    if SENT_FILE.exists():
-        return json.loads(SENT_FILE.read_text(encoding="utf-8"))
+def load_sent(path=SENT_FILE):
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
     return {"ids": [], "keys": []}
 
 
-def save_sent(sent, picked):
+def save_sent(sent, picked, path=SENT_FILE):
     sent["ids"] = (sent["ids"] + [v["id"] for v in picked])[-SENT_LIMIT:]
     sent["keys"] = (sent["keys"] + [v["key"] for v in picked])[-SENT_LIMIT:]
-    SENT_FILE.write_text(json.dumps(sent, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(sent, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 
 
 def main():
@@ -624,10 +696,18 @@ def main():
     if not dry_run and not (os.environ.get("TELEGRAM_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID")):
         raise SystemExit("Не заданы TELEGRAM_TOKEN и TELEGRAM_CHAT_ID (см. README).")
 
-    config = yaml.safe_load(CONFIG_FILE.read_text(encoding="utf-8"))
+    # PROFILE=mom — личный поиск по config_mom.yaml со своим списком отправленного.
+    profile = os.environ.get("PROFILE", "").strip()
+    if profile in ("", "main"):
+        config_file, sent_file = CONFIG_FILE, SENT_FILE
+    elif re.fullmatch(r"[a-z0-9_]+", profile):
+        config_file, sent_file = ROOT / f"config_{profile}.yaml", ROOT / f"sent_{profile}.json"
+    else:
+        raise SystemExit(f"Непонятный профиль «{profile}»")
+    config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
     allowed = experience_filter(config)
     allow_unknown = config.get("experience_unknown", True)
-    sent = load_sent()
+    sent = load_sent(sent_file)
     # Запуск по кнопке «Ещё 5»: другое число вакансий и другой заголовок.
     extra = os.environ.get("MODE") == "extra"
     count = os.environ.get("COUNT", "").strip()
@@ -644,15 +724,16 @@ def main():
     print(f"Подходящих новых вакансий: {len(candidates)}")
     picked = pick(candidates, config, allowed, allow_unknown)
 
-    message = build_message(picked, problems, today, allowed, extra)
+    message = build_message(picked, problems, today, allowed, extra, config)
     print("\n" + message + "\n")
     if dry_run:
         print("(--dry-run: ничего не отправлено и не сохранено)")
         return
-    send_telegram(message, with_button=os.environ.get("MORE_BUTTON") != "0")
+    send_telegram(message, with_button=os.environ.get("MORE_BUTTON") != "0",
+                  button=config.get("button"), only_owner=config.get("send_to") == "owner")
     if not extra:
         sent["last_daily"] = today.date().isoformat()
-    save_sent(sent, picked)
+    save_sent(sent, picked, sent_file)
     print("Отправлено в Telegram.")
 
 

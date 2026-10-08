@@ -24,6 +24,13 @@ on:
         description: "Сколько вакансий прислать (пусто — как в config.yaml)"
         type: string
         default: ""
+      profile:
+        description: "main — вакансии для канала, mom — личный поиск для мамы"
+        type: choice
+        default: main
+        options:
+          - main
+          - mom
       mode:
         description: "daily — утренняя подборка, extra — «Ещё вакансии»"
         type: choice
@@ -60,6 +67,7 @@ jobs:
           EXPERIENCE: ${{ inputs.experience }}
           COUNT: ${{ inputs.count }}
           MODE: ${{ inputs.mode }}
+          PROFILE: ${{ inputs.profile }}
           SKIP_IF_SENT: ${{ github.event_name == 'schedule' && '1' || '' }}
         run: python parser.py
 
@@ -67,7 +75,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add sent.json
+          git add sent*.json
           git diff --cached --quiet || git commit -m "Отправленные вакансии за $(date +%d.%m.%Y)"
           git pull --rebase
           git push
