@@ -106,12 +106,12 @@ def text_of(element):
 
 def vacancy(source, vacancy_id, url, title, company="", city="", remote=False,
             experience=None, snippet="", card_text=""):
-    salary, salary_text = detect_salary(card_text or snippet)
+    salary, salary_text, currency = detect_salary(card_text or snippet)
     return {
         "source": source, "id": vacancy_id, "url": url, "title": title,
         "company": company, "city": city, "remote": remote,
         "experience": experience or detect_experience(snippet), "snippet": snippet,
-        "salary": salary, "salary_text": salary_text,
+        "salary": salary, "salary_text": salary_text, "currency": currency,
     }
 
 
@@ -283,30 +283,49 @@ def detect_experience(text):
 
 SALARY = re.compile(
     r"(?:(?:от|до)\s*)?(\d[\d\s\u202f\xa0]*)(?:[.,]\d+)?"
-    r"(?:\s*[-–—]\s*(\d[\d\s\u202f\xa0]*)(?:[.,]\d+)?)?\s*"
-    r"(br\b|byn|бел\.?\s*руб|руб|р\.|\$|usd)"
+    r"(?:\s*(?:[-–—]|до)\s*(\d[\d\s\u202f\xa0]*)(?:[.,]\d+)?)?\s*"
+    r"(br\b|byn|бел\.?\s*руб|росс?\.?\s*руб|руб|р\.|₽|rub\b|\$|usd|€|eur\b)"
     r"|(\$|usd)\s*(\d[\d\s\u202f\xa0]*)",
     re.IGNORECASE,
 )
 USD_RATE = 3.0  # примерный курс для сравнения зарплат в долларах
 
 
+def currency_of(sign, top):
+    """BYN, USD, EUR или RUB. «руб» без уточнения в Беларуси — белорусские рубли,
+    но суммы от 20 000 бывают только в российских."""
+    sign = sign.lower()
+    if sign in ("$", "usd"):
+        return "USD"
+    if sign in ("€", "eur"):
+        return "EUR"
+    if sign in ("₽", "rub") or sign.startswith("рос"):
+        return "RUB"
+    if sign.startswith(("руб", "р.")) and top >= 20000:
+        return "RUB"
+    return "BYN"
+
+
 def detect_salary(text):
-    """Находит зарплату в тексте: возвращает (наибольшая сумма в BYN, как написано) или (None, "")."""
+    """Находит зарплату в тексте.
+    Возвращает (наибольшая сумма в BYN или None, как написано, валюта) или (None, "", None)."""
     for match in SALARY.finditer(text or ""):
         if match.group(5):
-            numbers, currency = [match.group(5)], "$"
+            numbers, sign = [match.group(5)], "$"
         else:
-            numbers, currency = [match.group(1), match.group(2)], match.group(3)
+            numbers, sign = [match.group(1), match.group(2)], match.group(3)
         values = [int(re.sub(r"\D", "", n)) for n in numbers if n and re.sub(r"\D", "", n)]
         values = [v for v in values if v >= 100]  # отсекаем «2 раза в месяц» и т. п.
         if not values:
             continue
+        currency = currency_of(sign, max(values))
         shown = re.sub(r"\s+", " ", match.group(0)).strip()
         if shown.lower().startswith("от") and not match.group(2):
-            return None, shown  # «от 1 700» — верхней границы нет, порог не применяем
-        return max(values) * (USD_RATE if currency.lower() in ("$", "usd") else 1), shown
-    return None, ""
+            return None, shown, currency  # «от 1 700» — верхней границы нет, порог не применяем
+        if currency == "RUB":
+            return None, shown, currency
+        return max(values) * (USD_RATE if currency == "USD" else 1), shown, currency
+    return None, "", None
 
 
 def experience_filter(config):
@@ -353,6 +372,9 @@ def place_and_salary_ok(item, config):
         return False
     if config.get("require_salary") and not item["salary_text"]:
         return False
+    currencies = config.get("currencies")
+    if currencies and item["currency"] and item["currency"] not in currencies:
+        return False  # например, российские рубли
     return True
 
 
@@ -538,13 +560,40 @@ def fallback_summary(text):
     return "О вакансии", shorten(first_sentence, 200)
 
 
+ARCHIVED_TEXT = re.compile(
+    r"вакансия в архиве|в архиве с \d|вакансия закрыта|вакансия (больше )?не ?актуальн"
+    r"|вакансия снята с публикации|вакансия удалена|срок (действия|размещения) вакансии ист[её]к"
+    r"|this job (has expired|is no longer available)",
+    re.IGNORECASE,
+)
+
+
+def is_archived(soup, page):
+    """Вакансия в архиве или закрыта: такие не присылаем."""
+    if soup.select_one('[data-qa="vacancy-archive-description"], [data-qa="vacancy-title-archived-text"]'):
+        return True
+    if re.search(r'"archived"\s*:\s*"?true', page):
+        return True
+    for until in re.findall(r'"validThrough"\s*:\s*"([^"]+)"', page):
+        try:
+            if datetime.fromisoformat(until.replace("Z", "+00:00")) < datetime.now(ZoneInfo("UTC")):
+                return True
+        except ValueError:
+            pass
+    for tag in soup(["script", "style", "template", "noscript"]):
+        tag.decompose()  # в скриптах бывают служебные надписи «Вакансия в архиве»
+    return bool(ARCHIVED_TEXT.search(soup.get_text(" ", strip=True)))
+
+
 def load_details(item):
     """Открывает страницу вакансии: краткое описание и опыт, если его не было в поиске."""
     lines, page_text, final_url = [], "", item["url"]
+    item["archived"] = False
     try:
         page, final_url = fetch(item["url"])
         soup = BeautifulSoup(page, "html.parser")
         description = json_ld_description(soup)
+        item["archived"] = is_archived(soup, page)
         if description:
             lines = html_lines(description)
         else:
@@ -552,13 +601,16 @@ def load_details(item):
             lines = html_lines(container or soup.body or soup)
         page_text = " ".join(lines)
     except Exception as err:
+        response = getattr(err, "response", None)
+        if response is not None and response.status_code in (404, 410):
+            item["archived"] = True  # страницы вакансии больше нет
         print(f"Не удалось открыть {item['url']}: {err}", file=sys.stderr)
 
     item["page_text"] = page_text
     if item["experience"] is None:
         item["experience"] = detect_experience(page_text)
-    if item["salary"] is None:
-        item["salary"], item["salary_text"] = detect_salary(page_text)
+    if not item["salary_text"]:
+        item["salary"], item["salary_text"], item["currency"] = detect_salary(page_text)
     item["summary_label"], item["summary"] = (
         summarize(lines) or fallback_summary(item["snippet"] or " ".join(lines[:3]))
     )
@@ -581,7 +633,7 @@ def pick(candidates, config, allowed, allow_unknown):
             continue
         load_details(item)
         opened += 1
-        if (not experience_ok(item["experience"], allowed, allow_unknown)
+        if (item["archived"] or not experience_ok(item["experience"], allowed, allow_unknown)
                 or not text_ok(item, config) or not place_and_salary_ok(item, config)):
             continue
         companies.add(company)
