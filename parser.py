@@ -211,29 +211,6 @@ def search_minsk_business(query):
     return found
 
 
-def search_careerist(query):
-    soup = soup_of(f"https://minsk.careerist.ru/search/?category=vacancy&text={quote(query)}")
-    found = []
-    for link in soup.select("a.vacancyLink"):
-        card = link.find_parent(class_="list")
-        match = re.search(r"-(\d+)\.html", link.get("href", ""))
-        if not match or card is None:
-            continue
-        company = text_of(card.select_one(".list-right"))
-        texts = card.select(".list-block p.card-text")
-        found.append(vacancy(
-            "careerist.ru", "careerist:" + match.group(1),
-            link["href"],
-            text_of(link),
-            company="" if "партнерские" in company.lower() else company,
-            city=text_of(card.select_one(".room")),
-            remote="удал" in text_of(card).lower(),
-            snippet=text_of(texts[-1]) if texts else "",
-            card_text=text_of(card),
-        ))
-    return found
-
-
 def search_bebee(query):
     soup = soup_of(f"https://bebee.com/by/jobs?q={quote(query)}")
     found, seen = [], set()
@@ -270,14 +247,12 @@ SOURCES = {
     "praca.by": search_praca,
     "minsk.business": search_minsk_business,
     "belmeta.com": search_belmeta,
-    "careerist.ru": search_careerist,
     "bebee.com": search_bebee,
 }
 DESCRIPTION_SELECTORS = {
     "rabota.by": '[data-qa="vacancy-description"]',
     "praca.by": ".vacancy__description",
     "belmeta.com": "div.text",
-    "careerist.ru": ".targetDesBG",
 }
 
 
@@ -376,13 +351,21 @@ def place_and_salary_ok(item, config):
     min_salary = config.get("min_salary")
     if min_salary and item["salary"] is not None and item["salary"] < min_salary:
         return False
+    if config.get("require_salary") and not item["salary_text"]:
+        return False
     return True
 
 
 def text_ok(item, config):
     """Стоп-слова в полном тексте вакансии (например «английский», «ночные смены»)."""
     text = item.get("page_text", "").lower()
+    if config.get("skip_planned") and PLANNED.search(text):
+        return False
     return not any(re.search(word_pattern(w), text) for w in config.get("text_stop_words") or [])
+
+
+# «Вакансия, планируемая к созданию (перспективная)» — такого места пока нет.
+PLANNED = re.compile(r"планиру\w*\s+к\s+созданию|\(перспективн\w*\)|перспективн\w* вакансия")
 
 
 def word_pattern(word):

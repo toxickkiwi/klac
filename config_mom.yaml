@@ -9,15 +9,20 @@ show_salary: true
 
 only_city: Минск          # только Минск, без удалёнки
 prefer_city: Минск
-min_salary: 1800          # BYN; вакансии без указанной зарплаты тоже показываются
+min_salary: 1800          # BYN
 
 sources:
   - rabota.by
   - praca.by
   - minsk.business
   - belmeta.com
-  - careerist.ru
   - bebee.com
+
+# Пропускать вакансии без указанной зарплаты (true — да, false — нет)
+require_salary: true
+
+# Пропускать вакансии «планируемые к созданию (перспективные)» — такого места пока нет
+skip_planned: true
 
 experience: []
 experience_unknown: true
