@@ -733,6 +733,9 @@ def main():
 
     # PROFILE=mom — личный поиск по config_mom.yaml со своим списком отправленного.
     profile = os.environ.get("PROFILE", "").strip()
+    if profile == "threads":  # посты из Threads, где ищут специалиста
+        import threads_search
+        return threads_search.main(dry_run)
     if profile in ("", "main"):
         config_file, sent_file = CONFIG_FILE, SENT_FILE
     elif re.fullmatch(r"[a-z0-9_]+", profile):

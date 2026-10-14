@@ -19,7 +19,8 @@ const GITHUB_BRANCH = "claude/minsk-job-parser-ncts5s";
 const WORKFLOW_FILE = "daily.yml";
 const EXTRA_COUNT = "5";
 const BUTTON_TEXT = "➕ Ещё 5 вакансий";
-const MOM_BUTTON_TEXT = "👩 Для мамы"; // личный поиск, только для владельца (первый Id)
+const MOM_BUTTON_TEXT = "👩 Для мамы";
+const THREADS_BUTTON_TEXT = "🧵 Threads"; // посты из Threads, где ищут специалиста // личный поиск, только для владельца (первый Id)
 
 export default {
   async fetch(request, env) {
@@ -65,13 +66,17 @@ async function handleUpdate(update, env) {
     const query = update.callback_query;
     const chat = String(query.message ? query.message.chat.id : query.from.id);
     const isMom = query.data === "mom" && chat === allowed[0];
-    if (!allowed.includes(chat) || !(query.data === "more" || isMom)) {
+    const isThreads = query.data === "threads";
+    if (!allowed.includes(chat) || !(query.data === "more" || isMom || isThreads)) {
       return telegram(env, "answerCallbackQuery", { callback_query_id: query.id });
     }
     await telegram(env, "answerCallbackQuery", {
       callback_query_id: query.id,
       text: "Ищу ещё вакансии…",
     });
+    if (isThreads) {
+      return requestThreads(env, chat);
+    }
     return isMom ? requestMom(env, chat) : requestMore(env, chat);
   }
 
@@ -100,8 +105,8 @@ async function handleUpdate(update, env) {
         "Пришлю 5 вакансий, которых ещё не было.",
       reply_markup: {
         keyboard: chat === allowed[0]
-          ? [[{ text: BUTTON_TEXT }, { text: MOM_BUTTON_TEXT }]]
-          : [[{ text: BUTTON_TEXT }]],
+          ? [[{ text: BUTTON_TEXT }, { text: MOM_BUTTON_TEXT }], [{ text: THREADS_BUTTON_TEXT }]]
+          : [[{ text: BUTTON_TEXT }], [{ text: THREADS_BUTTON_TEXT }]],
         resize_keyboard: true,
         is_persistent: true,
       },
@@ -109,6 +114,9 @@ async function handleUpdate(update, env) {
   }
   if (text.startsWith("/more") || text === BUTTON_TEXT.toLowerCase() || /^ещ[её]/.test(text)) {
     return requestMore(env, chat);
+  }
+  if (text.startsWith("/threads") || text === THREADS_BUTTON_TEXT.toLowerCase()) {
+    return requestThreads(env, chat);
   }
   if (chat === allowed[0] && (text.startsWith("/mom") || text === MOM_BUTTON_TEXT.toLowerCase())) {
     return requestMom(env, chat);
@@ -121,6 +129,17 @@ async function requestMore(env, chat) {
     ? "🔎 Ищу ещё 5 вакансий, пришлю через 2–3 минуты."
     : `⚠️ Не получилось запустить поиск (GitHub ответил ${resp.status}). ` +
       "Проверьте GITHUB_TOKEN в настройках Cloudflare.";
+  if (!resp.ok) {
+    console.log("GitHub:", resp.status, await resp.text());
+  }
+  return telegram(env, "sendMessage", { chat_id: chat, text });
+}
+
+async function requestThreads(env, chat) {
+  const resp = await startWorkflow(env, { count: "5", mode: "extra", profile: "threads" });
+  const text = resp.ok
+    ? "🔎 Ищу посты в Threads, пришлю через 3–5 минут."
+    : `⚠️ Не получилось запустить поиск (GitHub ответил ${resp.status}).`;
   if (!resp.ok) {
     console.log("GitHub:", resp.status, await resp.text());
   }
@@ -167,6 +186,7 @@ async function setup(url, env) {
   await telegram(env, "setMyCommands", {
     commands: [
       { command: "more", description: "Ещё 5 вакансий" },
+      { command: "threads", description: "Посты из Threads, где ищут специалиста" },
       { command: "id", description: "Узнать Id этого чата" },
     ],
   });

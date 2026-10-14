@@ -25,12 +25,13 @@ on:
         type: string
         default: ""
       profile:
-        description: "main — вакансии для канала, mom — личный поиск для мамы"
+        description: "main — вакансии для канала, mom — поиск для мамы, threads — посты из Threads"
         type: choice
         default: main
         options:
           - main
           - mom
+          - threads
       mode:
         description: "daily — утренняя подборка, extra — «Ещё вакансии»"
         type: choice
@@ -68,6 +69,19 @@ jobs:
           COUNT: ${{ inputs.count }}
           MODE: ${{ inputs.mode }}
           PROFILE: ${{ inputs.profile }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          SKIP_IF_SENT: ${{ github.event_name == 'schedule' && '1' || '' }}
+        run: python parser.py
+
+      # Утром вслед за вакансиями — подборка постов из Threads (если задан APIFY_TOKEN).
+      - name: Найти посты в Threads
+        if: ${{ (inputs.profile == '' || inputs.profile == 'main') && inputs.mode != 'extra' }}
+        continue-on-error: true
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          PROFILE: threads
           SKIP_IF_SENT: ${{ github.event_name == 'schedule' && '1' || '' }}
         run: python parser.py
 
