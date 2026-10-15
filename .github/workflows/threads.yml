@@ -1,0 +1,43 @@
+name: Вакансии из Threads
+
+on:
+  schedule:
+    - cron: "10 5 * * *" # около 8:10 по Минску (GitHub может опоздать)
+  workflow_dispatch: # кнопка «Run workflow» для ручного запуска
+
+permissions:
+  contents: write # чтобы сохранять sent_threads.json с уже отправленными постами
+
+concurrency:
+  group: daily-vacancies # общий с «Вакансии дня»: запуски не мешают друг другу сохранять файлы
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Найти посты в Threads и отправить в Telegram
+        env:
+          THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python threads_parser.py
+
+      - name: Запомнить отправленные посты
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sent_threads.json
+          git diff --cached --quiet || git commit -m "Отправленные посты из Threads за $(date +%d.%m.%Y)"
+          git pull --rebase
+          git push
