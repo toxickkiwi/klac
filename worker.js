@@ -19,8 +19,12 @@ const GITHUB_BRANCH = "claude/minsk-job-parser-ncts5s";
 const WORKFLOW_FILE = "daily.yml";
 const EXTRA_COUNT = "5";
 const BUTTON_TEXT = "➕ Ещё 5 вакансий";
-const MOM_BUTTON_TEXT = "👩 Для мамы";
-const THREADS_BUTTON_TEXT = "🧵 Threads"; // посты из Threads, где ищут специалиста // личный поиск, только для владельца (первый Id)
+const MOM_BUTTON_TEXT = "👩 Для мамы"; // личный поиск, только для владельца (первый Id)
+const THREADS_BUTTON_TEXT = "🧵 Threads"; // посты из Threads, где ищут специалиста
+
+// Публикация в канал с кнопками (команда /post). Бот должен быть админом канала.
+const CHANNEL = "@klacprac";
+const CHANNEL_NAME = "Клацай, працуй!";
 
 export default {
   async fetch(request, env) {
@@ -65,6 +69,9 @@ async function handleUpdate(update, env) {
   if (update.callback_query) {
     const query = update.callback_query;
     const chat = String(query.message ? query.message.chat.id : query.from.id);
+    if (query.data === "publish" || query.data === "cancel") {
+      return handlePublish(env, query, chat === allowed[0]);
+    }
     const isMom = query.data === "mom" && chat === allowed[0];
     const isThreads = query.data === "threads";
     if (!allowed.includes(chat) || !(query.data === "more" || isMom || isThreads)) {
@@ -96,6 +103,12 @@ async function handleUpdate(update, env) {
       chat_id: chat,
       text: `У вас пока нет доступа. Перешлите владельцу бота этот Id: ${chat}`,
     });
+  }
+  // /post в ответ на пост → предпросмотр с кнопками и «Опубликовать в канал».
+  if (text.startsWith("/post")) {
+    return chat === allowed[0]
+      ? preparePost(env, chat, message, original)
+      : telegram(env, "sendMessage", { chat_id: chat, text: "Публиковать в канал может только владелец бота." });
   }
   // Пересланный пост из канала (в нём есть строки с ⚡️) → текст для Threads.
   if (message.forward_origin || original.includes("⚡")) {
@@ -197,6 +210,7 @@ async function setup(url, env) {
     commands: [
       { command: "more", description: "Ещё 5 вакансий" },
       { command: "threads", description: "Посты из Threads, где ищут специалиста" },
+      { command: "post", description: "Опубликовать пост в канал с кнопками" },
       { command: "id", description: "Узнать Id этого чата" },
     ],
   });
@@ -204,6 +218,94 @@ async function setup(url, env) {
     ? "✅ Готово! Напишите боту /start — внизу появится кнопка «Ещё 5 вакансий»."
     : `⚠️ Telegram ответил ошибкой: ${hook.description}. Проверьте TELEGRAM_TOKEN.`;
   return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+}
+
+// ---------- публикация в канал с кнопками ----------
+
+const POST_HELP =
+  "Как опубликовать пост с кнопками:\n" +
+  "1. Пришлите мне готовый пост (текст или фото с подписью).\n" +
+  "2. Ответьте на него (свайп влево или «Ответить») командой с контактами, например:\n" +
+  "/post @hr_anna https://rabota.by/vacancy/123\n\n" +
+  "@username — кнопки «Откликнуться» (с готовым сообщением) и «Профиль», " +
+  "ссылка — кнопка «Вакансия на сайте».\n" +
+  "3. Я покажу, как будет выглядеть пост. Нажмите «✅ Опубликовать».";
+
+// Готовое сообщение, которое подставится в чат с работодателем.
+function applyText(vacancy) {
+  return `Здравствуйте! Пишу по вакансии «${vacancy}» из канала ${CHANNEL_NAME} Хочу откликнуться.`;
+}
+
+async function preparePost(env, chat, message, original) {
+  const post = message.reply_to_message;
+  const args = original.trim().split(/\s+/).slice(1);
+  if (!post || !args.length) {
+    return telegram(env, "sendMessage", { chat_id: chat, text: POST_HELP });
+  }
+  const postText = post.text || post.caption || "";
+  const vacancy = (postText.split("\n")[0] || "")
+    .replace(/[\s\p{Extended_Pictographic}\uFE0F\u200d]+$/u, "")
+    .trim();
+  const rows = [];
+  for (const arg of args) {
+    const username = arg.match(/^@?([A-Za-z0-9_]{5,32})$/) && !arg.includes(".") ? arg.replace("@", "") : null;
+    if (username) {
+      const link = `https://t.me/${username}`;
+      rows.push([
+        { text: "💌 Откликнуться", url: `${link}?text=${encodeURIComponent(applyText(vacancy))}` },
+        { text: "👤 Профиль", url: link },
+      ]);
+    } else if (/^https?:\/\//.test(arg)) {
+      rows.push([{ text: "🔗 Вакансия на сайте", url: arg }]);
+    }
+  }
+  if (!rows.length) {
+    return telegram(env, "sendMessage", { chat_id: chat, text: POST_HELP });
+  }
+  // Предпросмотр — копия поста с кнопками; из неё же потом публикуем в канал.
+  return telegram(env, "copyMessage", {
+    chat_id: chat,
+    from_chat_id: chat,
+    message_id: post.message_id,
+    reply_markup: {
+      inline_keyboard: [
+        ...rows,
+        [{ text: "✅ Опубликовать", callback_data: "publish" }, { text: "✖️ Отмена", callback_data: "cancel" }],
+      ],
+    },
+  });
+}
+
+async function handlePublish(env, query, isOwner) {
+  const preview = query.message;
+  if (!isOwner || !preview) {
+    return telegram(env, "answerCallbackQuery", { callback_query_id: query.id });
+  }
+  if (query.data === "cancel") {
+    await telegram(env, "answerCallbackQuery", { callback_query_id: query.id, text: "Отменено" });
+    return telegram(env, "deleteMessage", { chat_id: preview.chat.id, message_id: preview.message_id });
+  }
+  const buttons = preview.reply_markup.inline_keyboard.slice(0, -1); // без «Опубликовать / Отмена»
+  const result = await telegram(env, "copyMessage", {
+    chat_id: CHANNEL,
+    from_chat_id: preview.chat.id,
+    message_id: preview.message_id,
+    reply_markup: { inline_keyboard: buttons },
+  });
+  if (!result.ok) {
+    await telegram(env, "answerCallbackQuery", { callback_query_id: query.id });
+    return telegram(env, "sendMessage", {
+      chat_id: preview.chat.id,
+      text: `⚠️ Не получилось опубликовать: ${result.description}. ` +
+        `Проверьте, что бот — администратор канала ${CHANNEL} с правом публикации.`,
+    });
+  }
+  await telegram(env, "answerCallbackQuery", { callback_query_id: query.id, text: "Опубликовано ✅" });
+  return telegram(env, "editMessageReplyMarkup", {
+    chat_id: preview.chat.id,
+    message_id: preview.message_id,
+    reply_markup: { inline_keyboard: buttons },
+  });
 }
 
 // ---------- пост из канала → пост для Threads ----------
