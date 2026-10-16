@@ -81,11 +81,12 @@ async function handleUpdate(update, env) {
   }
 
   const message = update.message;
-  if (!message || !message.text) {
+  const original = message && (message.text || message.caption);
+  if (!original) {
     return;
   }
   const chat = String(message.chat.id);
-  const text = message.text.trim().toLowerCase();
+  const text = original.trim().toLowerCase();
   if (text.startsWith("/id")) {
     // Помогает узнать Id группы или человека, чтобы добавить его в TELEGRAM_CHAT_ID.
     return telegram(env, "sendMessage", { chat_id: chat, text: `Id этого чата: ${chat}` });
@@ -96,13 +97,22 @@ async function handleUpdate(update, env) {
       text: `У вас пока нет доступа. Перешлите владельцу бота этот Id: ${chat}`,
     });
   }
+  // Пересланный пост из канала (в нём есть строки с ⚡️) → текст для Threads.
+  if (message.forward_origin || original.includes("⚡")) {
+    return telegram(env, "sendMessage", {
+      chat_id: chat,
+      text: toThreads(original),
+      reply_parameters: { message_id: message.message_id },
+    });
+  }
   if (text.startsWith("/start") || text.startsWith("/help")) {
     return telegram(env, "sendMessage", {
       chat_id: chat,
       text:
         "Привет! Каждое утро я присылаю подборку вакансий.\n\n" +
         `Нужно больше — нажмите «${BUTTON_TEXT}» внизу или напишите /more. ` +
-        "Пришлю 5 вакансий, которых ещё не было.",
+        "Пришлю 5 вакансий, которых ещё не было.\n\n" +
+        "Перешлите мне пост из канала — пришлю его в формате для Threads.",
       reply_markup: {
         keyboard: chat === allowed[0]
           ? [[{ text: BUTTON_TEXT }, { text: MOM_BUTTON_TEXT }], [{ text: THREADS_BUTTON_TEXT }]]
@@ -194,6 +204,90 @@ async function setup(url, env) {
     ? "✅ Готово! Напишите боту /start — внизу появится кнопка «Ещё 5 вакансий»."
     : `⚠️ Telegram ответил ошибкой: ${hook.description}. Проверьте TELEGRAM_TOKEN.`;
   return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+}
+
+// ---------- пост из канала → пост для Threads ----------
+
+const THREADS_FOOTER = "💌 Откликнуться — в нашем тг-канале Клацай, працуй! (ссылка в шапке)";
+const THREADS_LIMIT = 500; // столько символов помещается в один пост Threads
+const MAX_DUTIES = 6;
+
+function toThreads(post) {
+  const lines = post.split("\n").map((l) => l.trim()).filter(Boolean);
+  // Первая строка — «Должность / Компания», эмодзи в конце убираем.
+  const title = (lines[0] || "").replace(/[\s\p{Extended_Pictographic}\uFE0F\u200d]+$/u, "");
+
+  // Строки с ⚡️: зарплата, формат работы (без адреса), опыт.
+  const facts = lines
+    .filter((l) => l.startsWith("⚡"))
+    .map((l) => l.replace(/^⚡\uFE0F?\s*/, ""))
+    .map((l) => l.split(" / ")[0].trim())
+    .map((l) => `⚡️ ${l}`);
+
+  const duties = shortDuties(sectionItems(lines, /обязанност|задачи|чем (предстоит|нужно)/i));
+  const parts = [title, facts.join("\n")];
+  if (duties.length) {
+    parts.push(dutiesSentence(duties));
+  }
+  parts.push(THREADS_FOOTER);
+  let result = parts.filter(Boolean).join("\n\n");
+  // Не влезает в 500 символов — убираем обязанности по одной с конца.
+  for (let n = duties.length - 1; result.length > THREADS_LIMIT && n >= 1; n--) {
+    parts[2] = dutiesSentence(duties.slice(0, n));
+    result = parts.filter(Boolean).join("\n\n");
+  }
+  return result;
+}
+
+// Пункты раздела после заголовка «⏺️ ОБЯЗАННОСТИ:» до следующего «⏺️».
+function sectionItems(lines, heading) {
+  const start = lines.findIndex((l) => l.startsWith("⏺") && heading.test(l));
+  if (start < 0) {
+    return [];
+  }
+  const items = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith("⏺") || line.startsWith("💌") || line.startsWith("#")) {
+      break;
+    }
+    if (/^\.{3}|подробнее на сайте/i.test(line)) {
+      continue;
+    }
+    items.push(line.replace(/^[—–\-•·*]\s*/, ""));
+  }
+  return items;
+}
+
+// «Вести проекты полного цикла: от брифа до сдачи…» → «вести проекты полного цикла».
+function shortDuties(items) {
+  return items
+    .map((item) => item.split(/[:;,(]|\s[—–-]\s/)[0])
+    .map((item) => item.replace(/[.!…\s]+$/, "").trim())
+    .map((item) => trimDangling(cutAtPreposition(item.split(/\s+/)).slice(0, 4)).join(" "))
+    .filter((item) => item.length > 2)
+    .slice(0, MAX_DUTIES);
+}
+
+// «Коммуникация с клиентом на всех этапах» → «коммуникация с клиентом»: уточнения после
+// предлога «на / в / по / для…» отбрасываем (если до него уже есть два слова).
+const CUT_BEFORE = /^(на|в|во|по|для|от|до|при|за|из|без|через|между|согласно)$/i;
+function cutAtPreposition(words) {
+  const at = words.findIndex((w, i) => i >= 2 && CUT_BEFORE.test(w));
+  return at > 0 ? words.slice(0, at) : words;
+}
+
+// Не оставляем в конце обрывки вроде «сроков и стоимости с».
+const DANGLING = /^(и|а|или|с|со|в|во|на|по|для|от|до|к|ко|о|об|при|за|из|у|без|над|под|через|а также)$/i;
+function trimDangling(words) {
+  while (words.length > 1 && (DANGLING.test(words[words.length - 1]) || /,$/.test(words[words.length - 1]))) {
+    words = words.slice(0, -1);
+  }
+  return words;
+}
+
+function dutiesSentence(duties) {
+  const text = duties.map((d, i) => (i ? d.charAt(0).toLowerCase() + d.slice(1) : d)).join(", ");
+  return text.charAt(0).toUpperCase() + text.slice(1) + "!";
 }
 
 // Секрет для проверки, что запрос пришёл именно от Telegram. Получается из токена бота,
