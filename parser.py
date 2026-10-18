@@ -622,7 +622,7 @@ def load_details(item):
 def pick(candidates, config, allowed, allow_unknown):
     """Выбирает вакансии на сегодня: подходящий опыт, не больше одной от компании
     и не больше трети списка с одного сайта — чтобы подборка была разнообразной."""
-    picked, companies, per_source, opened = [], set(), {}, 0
+    picked, companies, per_source, per_category, opened = [], set(), {}, {}, 0
     per_day = config.get("per_day", 10)
     source_limit = max(2, -(-per_day // 3))
     for item in candidates:
@@ -631,6 +631,8 @@ def pick(candidates, config, allowed, allow_unknown):
         company = item["key"].split("|")[1]
         if (company and company in companies) or per_source.get(item["source"], 0) >= source_limit:
             continue
+        if per_category.get(item["category"], 0) >= config.get("max_per_category", per_day):
+            continue
         load_details(item)
         opened += 1
         if (item["archived"] or not experience_ok(item["experience"], allowed, allow_unknown)
@@ -638,6 +640,7 @@ def pick(candidates, config, allowed, allow_unknown):
             continue
         companies.add(company)
         per_source[item["source"]] = per_source.get(item["source"], 0) + 1
+        per_category[item["category"]] = per_category.get(item["category"], 0) + 1
         picked.append(item)
     return picked
 
