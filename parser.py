@@ -403,6 +403,8 @@ def find_category(title, config):
     if any(re.search(word_pattern(w), title) for w in config.get("stop_words") or []):
         return None
     for category in sorted(config["categories"], key=lambda c: c["priority"]):
+        if any(re.search(word_pattern(w), title) for w in category.get("exclude") or []):
+            continue  # слово-исключение этой сферы, например «интерьер» для дизайна
         if any(re.search(word_pattern(w), title) for w in category["title"]):
             return category
     return None
